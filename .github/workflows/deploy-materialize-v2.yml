@@ -30,7 +30,30 @@ env:
   CRON_EXPR: "15 * * * *"   # :15 each hour
 
 jobs:
+  check-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check deploy configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -z "${{ vars.PROJECT_ID }}" ]] && missing+=("PROJECT_ID")
+          [[ -z "${{ vars.REGION }}" ]] && missing+=("REGION")
+          [[ -z "${{ vars.BUCKET_NAME }}" ]] && missing+=("BUCKET_NAME")
+          [[ -z "${{ vars.RUNTIME_SA }}" ]] && missing+=("RUNTIME_SA")
+          [[ -z "${{ vars.DEPLOYER_SA }}" ]] && missing+=("DEPLOYER_SA")
+          [[ -z "${{ vars.WORKLOAD_IDENTITY_PROVIDER }}" ]] && missing+=("WORKLOAD_IDENTITY_PROVIDER")
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "Skipping deploy-materialize-v2 because these repo variables are missing: ${missing[*]}"
+          else
+            echo "All required deploy repo variables are present."
+          fi
+
   deploy:
+    needs: check-config
+    if: ${{ vars.PROJECT_ID != '' && vars.REGION != '' && vars.BUCKET_NAME != '' && vars.RUNTIME_SA != '' && vars.DEPLOYER_SA != '' && vars.WORKLOAD_IDENTITY_PROVIDER != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,8 +61,8 @@ jobs:
       - name: Auth (WIF)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.DEPLOYER_SA }}
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SA }}
           create_credentials_file: true
           export_environment_variables: true
 
@@ -173,8 +196,8 @@ jobs:
         id: auth-smoke
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.DEPLOYER_SA }}
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SA }}
           token_format: "id_token"
           id_token_audience: ${{ steps.cfurl.outputs.url }}
           id_token_include_email: true
