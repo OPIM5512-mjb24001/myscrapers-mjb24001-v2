@@ -33,18 +33,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check required config
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -z "${{ vars.PROJECT_ID }}" ]] && missing+=("PROJECT_ID")
+          [[ -z "${{ vars.REGION }}" ]] && missing+=("REGION")
+          [[ -z "${{ vars.BUCKET_NAME }}" ]] && missing+=("BUCKET_NAME")
+          [[ -z "${{ vars.RUNTIME_SA }}" ]] && missing+=("RUNTIME_SA")
+          [[ -z "${{ vars.DEPLOYER_SA }}" ]] && missing+=("DEPLOYER_SA")
+          [[ -z "${{ vars.WORKLOAD_IDENTITY_PROVIDER }}" ]] && missing+=("WORKLOAD_IDENTITY_PROVIDER")
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required repo variables: ${missing[*]}"
+            exit 1
+          fi
+
       - name: Auth (WIF)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.DEPLOYER_SA }}
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SA }}
           create_credentials_file: true
           export_environment_variables: true
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: ${{ env.PROJECT_ID }}
+          project_id: ${{ vars.PROJECT_ID }}
 
       - name: Deploy Cloud Function (Gen2)
         run: |
