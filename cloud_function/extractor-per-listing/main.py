@@ -38,16 +38,44 @@ storage_client = storage.Client()
 # -------------------- SIMPLE REGEX EXTRACTORS --------------------
 PRICE_RE         = re.compile(r"\$\s?([0-9,]+)")
 YEAR_RE          = re.compile(r"\b(?:19|20)\d{2}\b")
-MAKE_MODEL_RE    = re.compile(r"\b([A-Z][a-z]+)\s+([A-Z][A-Za-z0-9]+)")
 MILEAGE_RE       = re.compile(r"(?:mileage|odometer)\s*[:\-]?\s*([\d,]+)", re.I)
 MILES_K_RE       = re.compile(r"(\d+(?:\.\d+)?)\s*k\s*(?:mi|mile|miles)\b", re.I)
 MILES_RE         = re.compile(r"(\d{1,3}(?:[,\d]{3})*)\s*(?:mi|mile|miles)\b", re.I)
 FIELD_LINE_RE    = re.compile(r"(?im)^\s*([a-z][a-z ]*[a-z])\s*:\s*(.+?)\s*$")
 POST_ID_RE       = re.compile(r"(?im)^\s*post(?:ing)? id\s*:\s*(\d+)\s*$")
 POSTED_AT_RE     = re.compile(r"(?im)^\s*posted\s*:\s*([^\n]+?)\s*$")
-TITLE_NOISE_RE   = re.compile(r"^(?:qr code link to this post|craigslist(?:\s*-\s*.*)?)$", re.I)
+TITLE_LINE_RE    = re.compile(
+    r"^\s*((?:19|20)\d{2})\s+([A-Za-z][A-Za-z0-9&'/.-]*)\s+([A-Za-z0-9][A-Za-z0-9&'/.-]*)\b",
+    re.I,
+)
 TITLE_TOKEN_RE   = re.compile(r"[A-Za-z0-9][A-Za-z0-9&'/.-]*")
 NON_WORD_RE      = re.compile(r"[^\w\s/-]+")
+TITLE_NOISE_BITS = (
+    "contact information",
+    "qr code link to this post",
+    "more ads by this seller",
+    "more ads by this user",
+    "google map",
+    "reply",
+    "favorite",
+    "flag",
+    "print",
+    "craigslist",
+    "dealer",
+    "account",
+    "hidden",
+    "favorites",
+    "post to classifieds",
+    "showing",
+    "availability",
+    "delivery available",
+)
+BAD_TITLE_TOKENS = {
+    "account", "ads", "by", "code", "contact", "craigslist", "dealer",
+    "favorite", "favorites", "flag", "google", "hidden", "information",
+    "link", "map", "more", "post", "print", "qr", "reply", "seller",
+    "this", "to", "user",
+}
 
 # -------------------- HELPERS --------------------
 def _normalize_text(text: str) -> str:
@@ -64,6 +92,11 @@ def _clean_label_value(value: str) -> str:
     value = NON_WORD_RE.sub(" ", value).strip().lower()
     return re.sub(r"\s+", " ", value)
 
+def _clean_title_line(line: str) -> str:
+    line = PRICE_RE.sub(" ", line)
+    line = re.sub(r"\s+", " ", line)
+    return line.strip(" -|")
+
 def _extract_labeled_value(text: str, *labels: str):
     for label in labels:
         pattern = re.compile(rf"(?im)^\s*{re.escape(label)}\s*:\s*([^\n]+?)\s*$")
@@ -77,65 +110,66 @@ def _extract_labeled_value(text: str, *labels: str):
 def _format_title_token(token: str) -> str:
     if not token:
         return token
+    if token.isupper() and len(token) <= 4:
+        return token
     if any(ch.isdigit() for ch in token):
-        return token.upper() if token.isalpha() else token.title()
+        return token.upper() if token == token.upper() else token[:1].upper() + token[1:]
     return token[:1].upper() + token[1:].lower()
 
-def _extract_title_line(text: str) -> str:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    for line in lines[:10]:
-        lower = line.lower()
-        if TITLE_NOISE_RE.match(lower):
-            continue
-        if FIELD_LINE_RE.match(line):
-            continue
-        candidate = PRICE_RE.sub(" ", line)
-        candidate = re.sub(r"\s+", " ", candidate).strip(" -|")
-        if len(candidate) < 4:
-            continue
-        if YEAR_RE.search(candidate) or MAKE_MODEL_RE.search(candidate):
-            return candidate
-    for line in lines[:5]:
-        if not FIELD_LINE_RE.match(line) and not TITLE_NOISE_RE.match(line.lower()):
-            return re.sub(r"\s+", " ", PRICE_RE.sub(" ", line)).strip(" -|")
-    return ""
+def _is_noise_title_line(line: str) -> bool:
+    line = _clean_title_line(line)
+    if not line or len(line) < 6:
+        return True
+    if FIELD_LINE_RE.match(line):
+        return True
+
+    lower = line.lower()
+    if ":" in line and not lower.startswith(("rebuilt ", "salvage ", "clean ")):
+        return True
+    if any(bit in lower for bit in TITLE_NOISE_BITS):
+        return True
+    if lower.startswith(("http", "www.", "reply ", "favorite ", "flag ", "print ")):
+        return True
+    if lower in {"google map", "contact information", "reply", "favorite", "flag", "print"}:
+        return True
+    return False
 
 def _extract_year_make_model(text: str) -> dict:
-    title = _extract_title_line(text)
     parsed = {}
+    lines = [line for line in text.splitlines() if line.strip()]
 
-    if title:
-        year_match = YEAR_RE.search(title)
-        if year_match:
-            year = _to_int(year_match.group(0))
+    for line in lines[:40]:
+        if _is_noise_title_line(line):
+            continue
+
+        candidate = _clean_title_line(line)
+        m = TITLE_LINE_RE.match(candidate)
+        if not m:
+            continue
+
+        year = _to_int(m.group(1))
+        make = m.group(2)
+        model = m.group(3)
+        if not year:
+            continue
+        if make.lower() in BAD_TITLE_TOKENS or model.lower() in BAD_TITLE_TOKENS:
+            continue
+
+        parsed["year"] = year
+        parsed["make"] = _format_title_token(make)
+        parsed["model"] = _format_title_token(model)
+        return parsed
+
+    for line in lines[:40]:
+        if _is_noise_title_line(line):
+            continue
+        candidate = _clean_title_line(line)
+        m = YEAR_RE.search(candidate)
+        if m:
+            year = _to_int(m.group(0))
             if year:
                 parsed["year"] = year
-            title = title[year_match.end():].strip(" -|")
-
-        tokens = TITLE_TOKEN_RE.findall(title)
-        tokens = [t for t in tokens if t.lower() not in {"for", "sale", "by", "owner", "dealer"}]
-        if tokens:
-            parsed["make"] = _format_title_token(tokens[0])
-        if len(tokens) > 1:
-            parsed["model"] = _format_title_token(tokens[1])
-
-    if "year" not in parsed:
-        for line in text.splitlines():
-            lower = line.lower()
-            if lower.startswith("posted:") or lower.startswith("post id:"):
-                continue
-            m = YEAR_RE.search(line)
-            if m:
-                year = _to_int(m.group(0))
-                if year:
-                    parsed["year"] = year
-                    break
-
-    if "make" not in parsed or "model" not in parsed:
-        mm = MAKE_MODEL_RE.search(text)
-        if mm:
-            parsed.setdefault("make", mm.group(1))
-            parsed.setdefault("model", mm.group(2))
+                break
 
     return parsed
 
