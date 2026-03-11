@@ -108,6 +108,26 @@ jobs:
       - name: Bootstrap IAM for Scheduler OIDC (runtime SA)
         run: |
           set -euo pipefail
+          retry_binding() {
+            local service_account="$1"
+            local member="$2"
+            local role="$3"
+            local delay=2
+
+            for attempt in 1 2 3 4 5; do
+              if gcloud iam service-accounts add-iam-policy-binding "${service_account}" \
+                --member="${member}" \
+                --role="${role}"; then
+                return 0
+              fi
+              if [[ "${attempt}" == "5" ]]; then
+                return 1
+              fi
+              echo "Binding ${role} failed on attempt ${attempt}; retrying in ${delay}s..."
+              sleep "${delay}"
+              delay=$((delay * 2))
+            done
+          }
           if [[ -z "${RUNTIME_SA:-}" ]]; then
             echo "RUNTIME_SA is empty; set repo var RUNTIME_SA to your runtime service account."; exit 1
           fi
@@ -116,18 +136,14 @@ jobs:
           echo "Scheduler agent: ${SCHED_AGENT}"
 
           # 1) Let Scheduler mint OIDC tokens as the RUNTIME_SA
-          gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA}" \
-            --member="serviceAccount:${SCHED_AGENT}" \
-            --role="roles/iam.serviceAccountTokenCreator" || {
+          retry_binding "${RUNTIME_SA}" "serviceAccount:${SCHED_AGENT}" "roles/iam.serviceAccountTokenCreator" || {
               echo "::error::Permission denied adding tokenCreator to ${RUNTIME_SA}. Run (once as project owner):"
               echo "gcloud iam service-accounts add-iam-policy-binding \"${RUNTIME_SA}\" --member=\"serviceAccount:${SCHED_AGENT}\" --role=\"roles/iam.serviceAccountTokenCreator\""
               exit 1
             }
       
           # 2) Allow the deployer SA to 'actAs' the RUNTIME_SA when creating the job
-          gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA}" \
-            --member="serviceAccount:${DEPLOYER_SA}" \
-            --role="roles/iam.serviceAccountUser" || {
+          retry_binding "${RUNTIME_SA}" "serviceAccount:${DEPLOYER_SA}" "roles/iam.serviceAccountUser" || {
               echo "::error::Permission denied adding ServiceAccountUser for ${DEPLOYER_SA} on ${RUNTIME_SA}. Run:"
               echo "gcloud iam service-accounts add-iam-policy-binding \"${RUNTIME_SA}\" --member=\"serviceAccount:${DEPLOYER_SA}\" --role=\"roles/iam.serviceAccountUser\""
               exit 1
