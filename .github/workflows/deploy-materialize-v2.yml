@@ -27,7 +27,7 @@ env:
   DEPLOYER_SA: ${{ vars.DEPLOYER_SA }}
   WORKLOAD_IDENTITY_PROVIDER: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
   SCHEDULE_BODY: ${{ vars.MATERIALIZE_BODY || '{}' }}
-  CRON_EXPR: "15 * * * *"   # :15 each hour
+  CRON_EXPR: "*/10 * * * *"   # every 10 minutes
 
 jobs:
   check-config:
@@ -160,7 +160,7 @@ jobs:
             exit 1
           fi
 
-      - name: Create/Update Cloud Scheduler job (:15 ET, OIDC)
+      - name: Create/Update Cloud Scheduler job (every 10 minutes, OIDC)
         shell: bash
         run: |
           set -euo pipefail

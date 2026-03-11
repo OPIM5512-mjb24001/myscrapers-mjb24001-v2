@@ -25,7 +25,7 @@ env:
   DEPLOYER_SA: ${{ vars.DEPLOYER_SA }}
   WORKLOAD_IDENTITY_PROVIDER: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
   SCHEDULE_BODY: ${{ vars.EXTRACTOR_BODY || '{"overwrite":true, "max_files":0}' }}
-  CRON_EXPR: "10 * * * *"   # :10 past each hour (America/New_York below)
+  CRON_EXPR: "*/10 * * * *"   # every 10 minutes
 
 jobs:
   deploy:
@@ -133,7 +133,7 @@ jobs:
             exit 1
           fi
 
-      - name: Create/Update Cloud Scheduler job (:10 ET, uses runtime SA OIDC)
+      - name: Create/Update Cloud Scheduler job (every 10 minutes, uses runtime SA OIDC)
         shell: bash
         run: |
           set -euo pipefail
