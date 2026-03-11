@@ -44,12 +44,51 @@ MILES_RE         = re.compile(r"(\d{1,3}(?:[,\d]{3})*)\s*(?:mi|mile|miles)\b", r
 FIELD_LINE_RE    = re.compile(r"(?im)^\s*([a-z][a-z ]*[a-z])\s*:\s*(.+?)\s*$")
 POST_ID_RE       = re.compile(r"(?im)^\s*post(?:ing)? id\s*:\s*(\d+)\s*$")
 POSTED_AT_RE     = re.compile(r"(?im)^\s*posted\s*:\s*([^\n]+?)\s*$")
-TITLE_LINE_RE    = re.compile(
-    r"^\s*((?:19|20)\d{2})\s+([A-Za-z][A-Za-z0-9&'/.-]*)\s+([A-Za-z0-9][A-Za-z0-9&'/.-]*)\b",
-    re.I,
-)
+TITLE_YEAR_RE    = re.compile(r"^\s*((?:19|20)\d{2})\b\s*(.+?)\s*$", re.I)
 TITLE_TOKEN_RE   = re.compile(r"[A-Za-z0-9][A-Za-z0-9&'/.-]*")
 NON_WORD_RE      = re.compile(r"[^\w\s/-]+")
+KNOWN_MAKES = {
+    "Ford", "Chevrolet", "Chevy", "GMC", "Dodge", "RAM", "Jeep", "Toyota",
+    "Honda", "Nissan", "Hyundai", "Kia", "Subaru", "Volkswagen", "VW",
+    "Audi", "BMW", "Acura", "Lexus", "Mazda", "Mercedes-Benz", "Mercedes",
+    "Volvo", "Jaguar", "Porsche", "Buick", "Cadillac", "Lincoln",
+    "Chrysler", "Infiniti", "Mitsubishi", "Mini",
+}
+MAKE_ALIASES = {
+    "acura": "Acura",
+    "audi": "Audi",
+    "bmw": "BMW",
+    "buick": "Buick",
+    "cadillac": "Cadillac",
+    "chevrolet": "Chevrolet",
+    "chevy": "Chevrolet",
+    "chrysler": "Chrysler",
+    "dodge": "Dodge",
+    "ford": "Ford",
+    "gmc": "GMC",
+    "honda": "Honda",
+    "hyundai": "Hyundai",
+    "infiniti": "Infiniti",
+    "jaguar": "Jaguar",
+    "jeep": "Jeep",
+    "kia": "Kia",
+    "lexus": "Lexus",
+    "lincoln": "Lincoln",
+    "mazda": "Mazda",
+    "mercedes": "Mercedes",
+    "mercedes-benz": "Mercedes-Benz",
+    "mini": "Mini",
+    "mitsubishi": "Mitsubishi",
+    "nissan": "Nissan",
+    "porsche": "Porsche",
+    "ram": "RAM",
+    "subaru": "Subaru",
+    "toyota": "Toyota",
+    "volkswagen": "Volkswagen",
+    "volvo": "Volvo",
+    "vw": "Volkswagen",
+}
+KNOWN_MAKE_LOOKUP = {make.lower(): MAKE_ALIASES.get(make.lower(), make) for make in KNOWN_MAKES}
 TITLE_NOISE_BITS = (
     "contact information",
     "qr code link to this post",
@@ -69,6 +108,12 @@ TITLE_NOISE_BITS = (
     "showing",
     "availability",
     "delivery available",
+    "save this search",
+    "new search",
+    "refresh the page",
+    "help / faq",
+    "avoid scams",
+    "no image",
 )
 BAD_TITLE_TOKENS = {
     "account", "ads", "by", "code", "contact", "craigslist", "dealer",
@@ -76,6 +121,25 @@ BAD_TITLE_TOKENS = {
     "link", "map", "more", "post", "print", "qr", "reply", "seller",
     "this", "to", "user",
 }
+TITLE_STOP_WORDS = {
+    "clean", "rebuilt", "salvage", "title", "financing", "warranty",
+    "available", "today", "trade", "trades", "obo", "firm",
+}
+TITLE_TRIM_WORDS = {
+    "base", "custom", "denali", "edition", "ex", "fx4", "lariat", "laramie",
+    "le", "limited", "lt", "ltz", "lx", "platinum", "premium", "se", "sel",
+    "slt", "sport", "touring", "xl", "xle", "xlt",
+}
+MODEL_NEEDS_PARTNER = {"grand", "super", "town"}
+MODEL_PAIR_WORDS = {
+    ("grand", "caravan"),
+    ("grand", "cherokee"),
+    ("super", "duty"),
+}
+MODEL_THREE_WORDS = {
+    ("town", "and", "country"),
+}
+NUMERIC_MODEL_PARTNERS = {"crew", "cab"}
 
 # -------------------- HELPERS --------------------
 def _normalize_text(text: str) -> str:
@@ -94,6 +158,7 @@ def _clean_label_value(value: str) -> str:
 
 def _clean_title_line(line: str) -> str:
     line = PRICE_RE.sub(" ", line)
+    line = re.sub(r"\s+[|/]\s+", " ", line)
     line = re.sub(r"\s+", " ", line)
     return line.strip(" -|")
 
@@ -110,6 +175,8 @@ def _extract_labeled_value(text: str, *labels: str):
 def _format_title_token(token: str) -> str:
     if not token:
         return token
+    if token.upper() in {"GMC", "BMW", "RAM", "VW", "AWD", "FWD", "RWD", "4WD", "4X4"}:
+        return token.upper()
     if token.isupper() and len(token) <= 4:
         return token
     if any(ch.isdigit() for ch in token):
@@ -130,43 +197,119 @@ def _is_noise_title_line(line: str) -> bool:
         return True
     if lower.startswith(("http", "www.", "reply ", "favorite ", "flag ", "print ")):
         return True
+    if lower.startswith(("contact ", "qr code ", "more ads ", "google map", "craigslist ")):
+        return True
     if lower in {"google map", "contact information", "reply", "favorite", "flag", "print"}:
         return True
     return False
+
+def _normalize_make(raw_make: str) -> str:
+    return KNOWN_MAKE_LOOKUP.get(raw_make.strip().lower(), "")
+
+def _extract_make_tokens(tokens: list[str]):
+    for size in (2, 1):
+        if len(tokens) < size:
+            continue
+        raw_make = " ".join(tokens[:size])
+        make = _normalize_make(raw_make)
+        if make:
+            return make, tokens[size:]
+    return "", tokens
+
+def _format_model_tokens(tokens: list[str]) -> str:
+    return " ".join(_format_title_token(token) for token in tokens)
+
+def _extract_model_tokens(tokens: list[str]) -> list[str]:
+    kept: list[str] = []
+    for token in tokens:
+        lower = token.lower()
+        if lower in BAD_TITLE_TOKENS:
+            break
+        if lower in TITLE_STOP_WORDS and kept:
+            break
+        kept.append(token)
+        if len(kept) >= 4:
+            break
+
+    if not kept:
+        return []
+
+    lower_tokens = [token.lower() for token in kept]
+
+    if tuple(lower_tokens[:3]) in MODEL_THREE_WORDS:
+        return kept[:3]
+    if tuple(lower_tokens[:2]) in MODEL_PAIR_WORDS:
+        return kept[:2]
+    if kept[0].isdigit() and len(kept) >= 2 and lower_tokens[1] in NUMERIC_MODEL_PARTNERS:
+        return kept[:2]
+
+    while len(kept) > 1 and kept[-1].lower() in TITLE_TRIM_WORDS:
+        kept.pop()
+
+    if not kept:
+        return []
+
+    if len(kept) == 1:
+        only = kept[0].lower()
+        if only in MODEL_NEEDS_PARTNER or only in TITLE_TRIM_WORDS:
+            return []
+        if _normalize_make(kept[0]):
+            return []
+        return kept
+
+    if kept[0].lower() in MODEL_NEEDS_PARTNER:
+        return kept[:2]
+
+    return kept[:3]
 
 def _extract_year_make_model(text: str) -> dict:
     parsed = {}
     lines = [line for line in text.splitlines() if line.strip()]
 
-    for line in lines[:40]:
+    # Make/model extraction is intentionally conservative so we leave blanks
+    # rather than writing obviously wrong vehicle values into the CSV.
+    for line in lines[:60]:
         if _is_noise_title_line(line):
             continue
 
         candidate = _clean_title_line(line)
-        m = TITLE_LINE_RE.match(candidate)
+        m = TITLE_YEAR_RE.match(candidate)
         if not m:
             continue
 
         year = _to_int(m.group(1))
-        make = m.group(2)
-        model = m.group(3)
         if not year:
             continue
-        if make.lower() in BAD_TITLE_TOKENS or model.lower() in BAD_TITLE_TOKENS:
+        remainder = m.group(2).strip()
+        if not remainder:
             continue
 
+        tokens = TITLE_TOKEN_RE.findall(remainder)
+        if len(tokens) < 2 or len(tokens) > 8:
+            if "year" not in parsed:
+                parsed["year"] = year
+            continue
+
+        make, model_tokens = _extract_make_tokens(tokens)
+        if not make:
+            if "year" not in parsed:
+                parsed["year"] = year
+            continue
+
+        model_tokens = _extract_model_tokens(model_tokens)
         parsed["year"] = year
-        parsed["make"] = _format_title_token(make)
-        parsed["model"] = _format_title_token(model)
+        parsed["make"] = make
+        if model_tokens:
+            parsed["model"] = _format_model_tokens(model_tokens)
         return parsed
 
-    for line in lines[:40]:
+    for line in lines[:60]:
         if _is_noise_title_line(line):
             continue
         candidate = _clean_title_line(line)
-        m = YEAR_RE.search(candidate)
+        m = TITLE_YEAR_RE.match(candidate) or YEAR_RE.search(candidate)
         if m:
-            year = _to_int(m.group(0))
+            year = _to_int(m.group(1) if m.lastindex else m.group(0))
             if year:
                 parsed["year"] = year
                 break
