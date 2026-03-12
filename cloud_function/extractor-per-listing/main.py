@@ -47,17 +47,18 @@ POSTED_AT_RE     = re.compile(r"(?im)^\s*posted\s*:\s*([^\n]+?)\s*$")
 TITLE_YEAR_RE    = re.compile(r"^\s*((?:19|20)\d{2})\b\s*(.+?)\s*$", re.I)
 TITLE_TOKEN_RE   = re.compile(r"[A-Za-z0-9][A-Za-z0-9&'/.-]*")
 NON_WORD_RE      = re.compile(r"[^\w\s/-]+")
-KNOWN_MAKES = {
-    "Ford", "Chevrolet", "Chevy", "GMC", "Dodge", "RAM", "Jeep", "Toyota",
-    "Honda", "Nissan", "Hyundai", "Kia", "Subaru", "Volkswagen", "VW",
-    "Audi", "BMW", "Acura", "Lexus", "Mazda", "Mercedes-Benz", "Mercedes",
-    "Volvo", "Jaguar", "Porsche", "Buick", "Cadillac", "Lincoln",
-    "Chrysler", "Infiniti", "Mitsubishi", "Mini",
+CANONICAL_MAKES = {
+    "Acura", "Audi", "BMW", "Buick", "Cadillac", "Chevrolet", "Chrysler",
+    "Dodge", "Ford", "GMC", "Honda", "Hyundai", "Infiniti", "Jaguar",
+    "Jeep", "Kia", "Lexus", "Lincoln", "Mazda", "Mercedes-Benz", "Mini",
+    "Mitsubishi", "Nissan", "Porsche", "Ram", "Subaru", "Toyota",
+    "Volkswagen", "Volvo",
 }
 MAKE_ALIASES = {
     "acura": "Acura",
     "audi": "Audi",
     "bmw": "BMW",
+    "benz": "Mercedes-Benz",
     "buick": "Buick",
     "cadillac": "Cadillac",
     "chevrolet": "Chevrolet",
@@ -69,26 +70,28 @@ MAKE_ALIASES = {
     "honda": "Honda",
     "hyundai": "Hyundai",
     "infiniti": "Infiniti",
+    "infinity": "Infiniti",
     "jaguar": "Jaguar",
     "jeep": "Jeep",
     "kia": "Kia",
     "lexus": "Lexus",
     "lincoln": "Lincoln",
     "mazda": "Mazda",
-    "mercedes": "Mercedes",
+    "mercedes": "Mercedes-Benz",
+    "mercedes benz": "Mercedes-Benz",
     "mercedes-benz": "Mercedes-Benz",
     "mini": "Mini",
     "mitsubishi": "Mitsubishi",
     "nissan": "Nissan",
     "porsche": "Porsche",
-    "ram": "RAM",
+    "ram": "Ram",
     "subaru": "Subaru",
     "toyota": "Toyota",
     "volkswagen": "Volkswagen",
+    "volkswagon": "Volkswagen",
     "volvo": "Volvo",
     "vw": "Volkswagen",
 }
-KNOWN_MAKE_LOOKUP = {make.lower(): MAKE_ALIASES.get(make.lower(), make) for make in KNOWN_MAKES}
 TITLE_NOISE_BITS = (
     "contact information",
     "qr code link to this post",
@@ -125,11 +128,6 @@ TITLE_STOP_WORDS = {
     "clean", "rebuilt", "salvage", "title", "financing", "warranty",
     "available", "today", "trade", "trades", "obo", "firm",
 }
-TITLE_TRIM_WORDS = {
-    "base", "custom", "denali", "edition", "ex", "fx4", "lariat", "laramie",
-    "le", "limited", "lt", "ltz", "lx", "platinum", "premium", "se", "sel",
-    "slt", "sport", "touring", "xl", "xle", "xlt",
-}
 MODEL_NEEDS_PARTNER = {"grand", "super", "town"}
 MODEL_PAIR_WORDS = {
     ("grand", "caravan"),
@@ -140,6 +138,42 @@ MODEL_THREE_WORDS = {
     ("town", "and", "country"),
 }
 NUMERIC_MODEL_PARTNERS = {"crew", "cab"}
+TITLE_MODEL_STOP_WORDS = {
+    "and", "asking", "automatic", "awd", "best", "call", "calls", "cash",
+    "condition", "contact", "delivery", "diesel", "drive", "fwd", "gas",
+    "gasoline", "great", "located", "location", "manual", "miles", "mile",
+    "mi", "obo", "offer", "only", "price", "rwd", "sale", "selling", "title",
+    "transmission", "vin", "warranty",
+}
+LEADING_MODEL_NOISE = {"cargo", "passenger", "work"}
+BLOCKED_MAKE_KEYS = {
+    "accord", "civic", "e350", "f 150", "f150", "limited", "super", "whitney",
+    "xl", "xlt",
+}
+CYLINDER_PATTERNS = (
+    re.compile(r"(?i)\b([2-9]|10|12)\s*cyl(?:inder)?s?\b"),
+    re.compile(r"(?i)\b([vih])\s*[- ]?\s*([2-9]|10|12)\b"),
+)
+DRIVE_PATTERNS = (
+    (re.compile(r"(?i)\b4x4\b"), "4wd"),
+    (re.compile(r"(?i)\b4wd\b"), "4wd"),
+    (re.compile(r"(?i)\bfour[- ]wheel drive\b"), "4wd"),
+    (re.compile(r"(?i)\ball[- ]wheel drive\b"), "awd"),
+    (re.compile(r"(?i)\bawd\b"), "awd"),
+    (re.compile(r"(?i)\bfront[- ]wheel drive\b"), "fwd"),
+    (re.compile(r"(?i)\bfwd\b"), "fwd"),
+    (re.compile(r"(?i)\brear[- ]wheel drive\b"), "rwd"),
+    (re.compile(r"(?i)\brwd\b"), "rwd"),
+)
+YEAR_MIN = 1980
+YEAR_MAX = datetime.now(timezone.utc).year + 1
+MAKE_ALIAS_LOOKUP = {
+    re.sub(r"\s+", " ", key.replace("-", " ")).strip().lower(): value
+    for key, value in MAKE_ALIASES.items()
+}
+for make in CANONICAL_MAKES:
+    MAKE_ALIAS_LOOKUP[make.lower()] = make
+MAKE_SCAN_MAX_TOKENS = max(len(key.split()) for key in MAKE_ALIAS_LOOKUP)
 
 # -------------------- HELPERS --------------------
 def _normalize_text(text: str) -> str:
@@ -158,9 +192,28 @@ def _clean_label_value(value: str) -> str:
 
 def _clean_title_line(line: str) -> str:
     line = PRICE_RE.sub(" ", line)
+    line = re.sub(r"[;,]", " ", line)
     line = re.sub(r"\s+[|/]\s+", " ", line)
     line = re.sub(r"\s+", " ", line)
     return line.strip(" -|")
+
+def _normalize_make_key(value: str) -> str:
+    value = value.replace("&", " and ")
+    value = re.sub(r"[^a-z0-9]+", " ", value.lower())
+    return re.sub(r"\s+", " ", value).strip()
+
+def _is_plausible_year(year: int | None) -> bool:
+    return year is not None and YEAR_MIN <= year <= YEAR_MAX
+
+def _has_title_noise(lower_line: str) -> bool:
+    for bit in TITLE_NOISE_BITS:
+        if " " in bit or "/" in bit:
+            if bit in lower_line:
+                return True
+            continue
+        if re.search(rf"\b{re.escape(bit)}\b", lower_line):
+            return True
+    return False
 
 def _extract_labeled_value(text: str, *labels: str):
     for label in labels:
@@ -175,12 +228,18 @@ def _extract_labeled_value(text: str, *labels: str):
 def _format_title_token(token: str) -> str:
     if not token:
         return token
-    if token.upper() in {"GMC", "BMW", "RAM", "VW", "AWD", "FWD", "RWD", "4WD", "4X4"}:
+    if token.upper() in {"GMC", "BMW", "AWD", "FWD", "RWD", "4WD", "4X4"}:
         return token.upper()
     if token.isupper() and len(token) <= 4:
         return token
+    m = re.match(r"(?i)^([a-z]{1,4}[- ]?\d+[a-z]?)$", token)
+    if m:
+        return m.group(1).upper()
+    m = re.match(r"(?i)^(\d+[a-z])$", token)
+    if m:
+        return m.group(1).lower()
     if any(ch.isdigit() for ch in token):
-        return token.upper() if token == token.upper() else token[:1].upper() + token[1:]
+        return token if token == token.upper() else token[:1].upper() + token[1:]
     return token[:1].upper() + token[1:].lower()
 
 def _is_noise_title_line(line: str) -> bool:
@@ -193,7 +252,7 @@ def _is_noise_title_line(line: str) -> bool:
     lower = line.lower()
     if ":" in line and not lower.startswith(("rebuilt ", "salvage ", "clean ")):
         return True
-    if any(bit in lower for bit in TITLE_NOISE_BITS):
+    if _has_title_noise(lower):
         return True
     if lower.startswith(("http", "www.", "reply ", "favorite ", "flag ", "print ")):
         return True
@@ -204,10 +263,15 @@ def _is_noise_title_line(line: str) -> bool:
     return False
 
 def _normalize_make(raw_make: str) -> str:
-    return KNOWN_MAKE_LOOKUP.get(raw_make.strip().lower(), "")
+    key = _normalize_make_key(raw_make.strip())
+    if not key or key in BLOCKED_MAKE_KEYS:
+        return ""
+    if re.fullmatch(r"[a-z]?\d[\w-]*", key.replace(" ", "")):
+        return ""
+    return MAKE_ALIAS_LOOKUP.get(key, "")
 
 def _extract_make_tokens(tokens: list[str]):
-    for size in (2, 1):
+    for size in range(min(MAKE_SCAN_MAX_TOKENS, len(tokens)), 0, -1):
         if len(tokens) < size:
             continue
         raw_make = " ".join(tokens[:size])
@@ -216,17 +280,54 @@ def _extract_make_tokens(tokens: list[str]):
             return make, tokens[size:]
     return "", tokens
 
+def _find_make_in_tokens(tokens: list[str]):
+    max_size = min(MAKE_SCAN_MAX_TOKENS, len(tokens))
+    for start in range(len(tokens)):
+        for size in range(max_size, 0, -1):
+            if start + size > len(tokens):
+                continue
+            raw_make = " ".join(tokens[start:start + size])
+            make = _normalize_make(raw_make)
+            if make:
+                return make, start, size
+    return "", -1, 0
+
 def _format_model_tokens(tokens: list[str]) -> str:
     return " ".join(_format_title_token(token) for token in tokens)
 
+def _looks_like_mileage(token: str, next_token: str = "") -> bool:
+    plain = token.replace(",", "").replace("$", "")
+    if next_token.lower() in {"mile", "miles", "mi"} and plain.isdigit():
+        return True
+    if re.fullmatch(r"\d+(?:\.\d+)?k", plain.lower()):
+        return True
+    return False
+
+def _is_model_stop_token(token: str, next_token: str = "", kept: list[str] | None = None) -> bool:
+    kept = kept or []
+    lower = token.lower()
+    if lower in BAD_TITLE_TOKENS or lower in TITLE_MODEL_STOP_WORDS:
+        return bool(kept) or lower not in {"and"}
+    if lower in TITLE_STOP_WORDS:
+        return True
+    if _normalize_make(token):
+        return bool(kept)
+    if _looks_like_mileage(token, next_token):
+        return True
+    if re.fullmatch(r"\$[\d,]+", token):
+        return True
+    if re.search(r"[@#/]", token):
+        return True
+    return False
+
 def _extract_model_tokens(tokens: list[str]) -> list[str]:
     kept: list[str] = []
-    for token in tokens:
-        lower = token.lower()
-        if lower in BAD_TITLE_TOKENS:
+    for idx, token in enumerate(tokens):
+        next_token = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+        if _is_model_stop_token(token, next_token, kept):
             break
-        if lower in TITLE_STOP_WORDS and kept:
-            break
+        if not kept and token.lower() in LEADING_MODEL_NOISE:
+            continue
         kept.append(token)
         if len(kept) >= 4:
             break
@@ -243,15 +344,9 @@ def _extract_model_tokens(tokens: list[str]) -> list[str]:
     if kept[0].isdigit() and len(kept) >= 2 and lower_tokens[1] in NUMERIC_MODEL_PARTNERS:
         return kept[:2]
 
-    while len(kept) > 1 and kept[-1].lower() in TITLE_TRIM_WORDS:
-        kept.pop()
-
-    if not kept:
-        return []
-
     if len(kept) == 1:
         only = kept[0].lower()
-        if only in MODEL_NEEDS_PARTNER or only in TITLE_TRIM_WORDS:
+        if only in MODEL_NEEDS_PARTNER:
             return []
         if _normalize_make(kept[0]):
             return []
@@ -262,30 +357,43 @@ def _extract_model_tokens(tokens: list[str]) -> list[str]:
 
     return kept[:3]
 
+def _title_candidate_lines(text: str, limit: int = 20) -> list[str]:
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        if len(lines) >= limit:
+            break
+        if _is_noise_title_line(raw_line):
+            continue
+        candidate = _clean_title_line(raw_line)
+        if candidate:
+            lines.append(candidate)
+    return lines
+
+def _extract_year_from_text(text: str) -> int | None:
+    for match in YEAR_RE.finditer(text):
+        year = _to_int(match.group(0))
+        if _is_plausible_year(year):
+            return year
+    return None
+
 def _extract_year_make_model(text: str) -> dict:
     parsed = {}
-    lines = [line for line in text.splitlines() if line.strip()]
+    title_lines = _title_candidate_lines(text, limit=20)
 
-    # Make/model extraction is intentionally conservative so we leave blanks
-    # rather than writing obviously wrong vehicle values into the CSV.
-    for line in lines[:60]:
-        if _is_noise_title_line(line):
-            continue
-
-        candidate = _clean_title_line(line)
+    for candidate in title_lines:
         m = TITLE_YEAR_RE.match(candidate)
         if not m:
             continue
 
         year = _to_int(m.group(1))
-        if not year:
+        if not _is_plausible_year(year):
             continue
         remainder = m.group(2).strip()
         if not remainder:
             continue
 
         tokens = TITLE_TOKEN_RE.findall(remainder)
-        if len(tokens) < 2 or len(tokens) > 8:
+        if not tokens:
             if "year" not in parsed:
                 parsed["year"] = year
             continue
@@ -303,16 +411,39 @@ def _extract_year_make_model(text: str) -> dict:
             parsed["model"] = _format_model_tokens(model_tokens)
         return parsed
 
-    for line in lines[:60]:
-        if _is_noise_title_line(line):
+    for candidate in title_lines:
+        tokens = TITLE_TOKEN_RE.findall(candidate)
+        if not tokens:
             continue
-        candidate = _clean_title_line(line)
-        m = TITLE_YEAR_RE.match(candidate) or YEAR_RE.search(candidate)
-        if m:
-            year = _to_int(m.group(1) if m.lastindex else m.group(0))
-            if year:
+        make, start, size = _find_make_in_tokens(tokens)
+        if not make:
+            continue
+
+        if "year" not in parsed:
+            year = _extract_year_from_text(candidate)
+            if _is_plausible_year(year):
                 parsed["year"] = year
-                break
+
+        model_tokens = _extract_model_tokens(tokens[start + size:])
+        if not model_tokens and start > 0:
+            before_make = [token for token in tokens[:start] if not _is_plausible_year(_to_int(token))]
+            model_tokens = _extract_model_tokens(before_make[-4:])
+
+        parsed["make"] = make
+        if model_tokens:
+            parsed["model"] = _format_model_tokens(model_tokens)
+        if parsed.get("make") or parsed.get("year"):
+            return parsed
+
+    for line in title_lines:
+        year = _extract_year_from_text(line)
+        if _is_plausible_year(year):
+            parsed["year"] = year
+            return parsed
+
+    year = _extract_year_from_text(text)
+    if _is_plausible_year(year):
+        parsed["year"] = year
 
     return parsed
 
@@ -342,6 +473,35 @@ def _canon_drive(value: str) -> str:
         "rear wheel drive": "rwd",
     }
     return mapping.get(value, value.replace(" ", ""))
+
+def _extract_cylinders(text: str) -> int | None:
+    cylinders = _extract_labeled_value(text, "cylinders")
+    if cylinders:
+        for pattern in CYLINDER_PATTERNS:
+            m = pattern.search(cylinders)
+            if m:
+                return _to_int(m.group(m.lastindex))
+        cyl = _to_int(cylinders)
+        if cyl is not None:
+            return cyl
+
+    for pattern in CYLINDER_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return _to_int(m.group(m.lastindex))
+    return None
+
+def _extract_drive_type(text: str) -> str | None:
+    drive_type = _extract_labeled_value(text, "drive")
+    if drive_type:
+        drive = _canon_drive(drive_type)
+        if drive in {"fwd", "rwd", "awd", "4wd"}:
+            return drive
+
+    for pattern, drive in DRIVE_PATTERNS:
+        if pattern.search(text):
+            return drive
+    return None
 
 def _canon_transmission(value: str) -> str:
     value = _clean_label_value(value)
@@ -457,15 +617,13 @@ def parse_listing(text: str) -> dict:
     if condition:
         d["condition"] = _clean_label_value(condition)
 
-    cylinders = _extract_labeled_value(text, "cylinders")
-    if cylinders:
-        cyl = _to_int(cylinders)
-        if cyl is not None:
-            d["cylinders"] = cyl
+    cyl = _extract_cylinders(text)
+    if cyl is not None:
+        d["cylinders"] = cyl
 
-    drive_type = _extract_labeled_value(text, "drive")
+    drive_type = _extract_drive_type(text)
     if drive_type:
-        d["drive_type"] = _canon_drive(drive_type)
+        d["drive_type"] = drive_type
 
     fuel_type = _extract_labeled_value(text, "fuel")
     if fuel_type:

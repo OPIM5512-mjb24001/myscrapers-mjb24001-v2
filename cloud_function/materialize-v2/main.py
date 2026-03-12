@@ -44,6 +44,51 @@ CSV_COLUMNS = [
     "listing_posted_at",
     "source_txt",
 ]
+LATEST_ONLY_COLUMNS = {"post_id", "run_id", "scraped_at", "listing_posted_at", "source_txt"}
+BACKFILL_COLUMNS = [column for column in CSV_COLUMNS if column not in LATEST_ONLY_COLUMNS]
+MAKE_ALIASES = {
+    "acura": "Acura",
+    "audi": "Audi",
+    "bmw": "BMW",
+    "benz": "Mercedes-Benz",
+    "buick": "Buick",
+    "cadillac": "Cadillac",
+    "chevrolet": "Chevrolet",
+    "chevy": "Chevrolet",
+    "chrysler": "Chrysler",
+    "dodge": "Dodge",
+    "ford": "Ford",
+    "gmc": "GMC",
+    "honda": "Honda",
+    "hyundai": "Hyundai",
+    "infiniti": "Infiniti",
+    "infinity": "Infiniti",
+    "jaguar": "Jaguar",
+    "jeep": "Jeep",
+    "kia": "Kia",
+    "lexus": "Lexus",
+    "lincoln": "Lincoln",
+    "mazda": "Mazda",
+    "mercedes": "Mercedes-Benz",
+    "mercedes benz": "Mercedes-Benz",
+    "mercedes-benz": "Mercedes-Benz",
+    "mini": "Mini",
+    "mitsubishi": "Mitsubishi",
+    "nissan": "Nissan",
+    "porsche": "Porsche",
+    "ram": "Ram",
+    "subaru": "Subaru",
+    "toyota": "Toyota",
+    "volkswagen": "Volkswagen",
+    "volkswagon": "Volkswagen",
+    "volvo": "Volvo",
+    "vw": "Volkswagen",
+}
+MAKE_LOOKUP = {
+    re.sub(r"\s+", " ", key.replace("-", " ")).strip().lower(): value
+    for key, value in MAKE_ALIASES.items()
+}
+BLOCKED_MAKE_KEYS = {"accord", "civic", "e350", "f 150", "f150", "limited", "super", "whitney", "xl", "xlt"}
 
 
 def _is_valid_run_id(run_id: str) -> bool:
@@ -56,6 +101,89 @@ def _run_id_to_dt(run_id: str) -> datetime:
     if RUN_ID_PLAIN_RE.match(run_id):
         return datetime.strptime(run_id, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
     return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _parse_scraped_at(value: str) -> datetime:
+    value = str(value or "").strip()
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _is_empty_value(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return True
+        return cleaned.lower() in {"nan", "none", "null"}
+    return False
+
+
+def _normalize_make_key(value: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _normalize_make(value):
+    key = _normalize_make_key(value)
+    if not key:
+        return ""
+    if key in BLOCKED_MAKE_KEYS:
+        return ""
+    if re.fullmatch(r"[a-z]?\d[\w-]*", key.replace(" ", "")):
+        return ""
+    return MAKE_LOOKUP.get(key, "")
+
+
+def _canon_drive(value):
+    cleaned = re.sub(r"\s+", " ", str(value or "").strip().lower().replace("-", " "))
+    mapping = {
+        "4x4": "4wd",
+        "4wd": "4wd",
+        "four wheel drive": "4wd",
+        "awd": "awd",
+        "all wheel drive": "awd",
+        "fwd": "fwd",
+        "front wheel drive": "fwd",
+        "rwd": "rwd",
+        "rear wheel drive": "rwd",
+    }
+    return mapping.get(cleaned, value)
+
+
+def _normalize_record(record: Dict) -> Dict:
+    normalized = dict(record)
+    if not _is_empty_value(normalized.get("make")):
+        normalized["make"] = _normalize_make(normalized.get("make"))
+    if not _is_empty_value(normalized.get("drive_type")):
+        normalized["drive_type"] = _canon_drive(normalized.get("drive_type"))
+    return normalized
+
+
+def _record_sort_key(record: Dict):
+    run_id_dt = _run_id_to_dt(str(record.get("run_id", "")))
+    scraped_at_dt = _parse_scraped_at(record.get("scraped_at", ""))
+    return (run_id_dt, scraped_at_dt)
+
+
+def _merge_post_records(records: list[Dict]) -> Dict:
+    ordered = sorted((_normalize_record(record) for record in records), key=_record_sort_key, reverse=True)
+    merged = dict(ordered[0])
+    for column in BACKFILL_COLUMNS:
+        if not _is_empty_value(merged.get(column)):
+            continue
+        for older in ordered[1:]:
+            value = older.get(column)
+            if _is_empty_value(value):
+                continue
+            merged[column] = value
+            break
+    return _normalize_record(merged)
 
 
 def _list_run_ids(bucket: str, structured_prefix: str) -> list[str]:
@@ -164,7 +292,7 @@ def materialize_http(request: Request):
                 "min_run_id": min_run_id,
             }), 200
 
-        latest_by_post: Dict[str, Dict] = {}
+        records_by_post: Dict[str, list[Dict]] = {}
         stats = {"files_scanned": 0, "invalid_records": 0}
 
         for run_id in run_ids:
@@ -173,13 +301,10 @@ def materialize_http(request: Request):
                 if not post_id:
                     continue
 
-                previous = latest_by_post.get(post_id)
-                record_run_id = str(record.get("run_id", run_id))
-                if previous is None or _run_id_to_dt(record_run_id) > _run_id_to_dt(str(previous.get("run_id", ""))):
-                    latest_by_post[post_id] = record
+                records_by_post.setdefault(post_id, []).append(record)
 
         final_key = f"{STRUCTURED_PREFIX}/datasets/listings_master_v2.csv"
-        ordered_records = [latest_by_post[post_id] for post_id in sorted(latest_by_post)]
+        ordered_records = [_merge_post_records(records_by_post[post_id]) for post_id in sorted(records_by_post)]
         rows_written = _write_csv(ordered_records, final_key)
 
         return jsonify({
@@ -187,7 +312,7 @@ def materialize_http(request: Request):
             "runs_scanned": len(run_ids),
             "files_scanned": stats["files_scanned"],
             "invalid_records_skipped": stats["invalid_records"],
-            "unique_listings": len(latest_by_post),
+            "unique_listings": len(records_by_post),
             "rows_written": rows_written,
             "output_csv": f"gs://{BUCKET_NAME}/{final_key}",
             "min_run_id": min_run_id,
